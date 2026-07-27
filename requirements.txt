@@ -1,0 +1,4 @@
+betwatch
+streamlit
+openpyxl
+pandas
