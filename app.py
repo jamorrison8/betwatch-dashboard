@@ -27,9 +27,35 @@ Setup (Streamlit Community Cloud):
 import os
 from datetime import datetime, date
 from io import BytesIO
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
+
+SYDNEY_TZ = ZoneInfo("Australia/Sydney")
+
+
+def _format_sydney_time(start_time):
+    """
+    Betwatch's race.start_time may come back as a datetime or an ISO string,
+    with or without timezone info (assume UTC if bare, since that's what
+    Betwatch stores). Returns e.g. "2:35 PM" (Sydney local, no tz label
+    since the person only ever needs Sydney time) or None if unavailable.
+    """
+    if start_time is None:
+        return None
+    dt = start_time
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+        except Exception:
+            return None
+    if not isinstance(dt, datetime):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+    dt_syd = dt.astimezone(SYDNEY_TZ)
+    return dt_syd.strftime("%I:%M %p").lstrip("0")
 
 # ---------------------------------------------------------------------------
 # Deployment helpers: secrets wiring + password gate (no-ops when run locally
@@ -152,6 +178,7 @@ def fetch_raw_rows(client, date_from, date_to, track=None):
             race_no = getattr(race, "number", None)
             status = _status_str(race)
             results_str = _resolve_top4_results(race)
+            race_time = _format_sydney_time(getattr(race, "start_time", None))
 
             # Record every race that comes back, independent of whether any
             # runner has usable odds - a resulted race with no live prices
@@ -161,6 +188,7 @@ def fetch_raw_rows(client, date_from, date_to, track=None):
                 "race_no": race_no,
                 "status": status,
                 "results_str": results_str,
+                "race_time": race_time,
             })
 
             for runner in (getattr(race, "runners", None) or []):
@@ -207,6 +235,7 @@ def fetch_raw_rows(client, date_from, date_to, track=None):
                         "betfair_back_price": back_price,
                         "total_matched": float(total_matched),
                         "results_str": results_str,
+                        "race_time": race_time,
                     })
         except Exception:
             continue  # one malformed race must not kill the fetch
@@ -354,6 +383,40 @@ def build_odds_bundle(raw_rows, race_summaries, meta):
     return "\n".join(lines)
 
 
+def format_tracker_row(row, kind, race_date_iso, stake, commission_pct, account_prefix=""):
+    """
+    One tab-separated line matching the bet tracker's expected columns:
+    Date | Bookmaker | Type | Category | Race | Runner | Stake | Back odds |
+    Lay stake | Lay odds | Commission %
+    `row` is a single row (Series) from bonus_view or mug_view.
+    account_prefix is prepended to the bookmaker name here only (e.g. "2" for
+    a secondary account) - it never touches the main dashboard tables.
+    """
+    try:
+        d = datetime.fromisoformat(race_date_iso)
+        date_str = f"{d.strftime('%b')} {d.day}"
+    except Exception:
+        date_str = race_date_iso or ""
+
+    lay_stake_col = f"Lay Stake (${stake:g})"
+    race = f"{row['Track']} R{row['Race #']}"
+
+    fields = [
+        date_str,
+        f"{account_prefix}{row['Bookmaker']}",
+        kind,
+        "Racing",
+        race,
+        str(row["Runner"]),
+        f"${stake:,.2f}",
+        f"{row['Fixed Win']:g}",
+        f"${row.get(lay_stake_col, 0):,.2f}",
+        f"{row['BF Lay']:g}",
+        f"{commission_pct:.2f}%",
+    ]
+    return "\t".join(fields)
+
+
 def compute_tables(raw_rows, commission, stake, free_bet_mode):
     """
     Pure recomputation over the cached raw rows. Called on every rerun;
@@ -377,6 +440,7 @@ def compute_tables(raw_rows, commission, stake, free_bet_mode):
         if lay_size is not None and lay_size >= lay_stake_bonus:
             bonus_records.append({
                 "Track": r["track"], "Race #": r["race_no"],
+                "Race Time": r.get("race_time"),
                 "Runner #": r["runner_no"], "Runner": r["runner_name"],
                 "Bookmaker": r["bookmaker"],
                 "Fixed Win": B, "BF Lay": L, "Lay Size": lay_size,
@@ -390,6 +454,7 @@ def compute_tables(raw_rows, commission, stake, free_bet_mode):
         if lay_size is not None and lay_size >= lay_stake:
             mug_records.append({
                 "Track": r["track"], "Race #": r["race_no"],
+                "Race Time": r.get("race_time"),
                 "Runner #": r["runner_no"], "Runner": r["runner_name"],
                 "Bookmaker": r["bookmaker"],
                 "Fixed Win": B, "BF Lay": L,
@@ -559,6 +624,15 @@ def main():
                 st.caption(f"Not seen in this fetch (naming may differ): {', '.join(sorted(missing))}")
 
         st.divider()
+        use_second_account = st.checkbox(
+            "Use 2nd account prefix in tracker rows",
+            value=False,
+            help='Prefixes the bookmaker name with "2" (e.g. "2Sportsbet") in the '
+                 "bet tracker copy rows only - does not affect the tables above.",
+        )
+        account_prefix = "2" if use_second_account else ""
+
+        st.divider()
         target_retention = st.slider("Min retention % (Bonus tab)", 0.0, 120.0, 0.0, 1.0)
         target_loss = st.slider("Max loss $ (Mug tab)", 0.0, 50.0, 50.0, 0.5)
         min_liquidity = st.slider("Min liquidity - BF matched $ (Mug tab)",
@@ -611,6 +685,15 @@ def main():
                                file_name="bonus_conversions.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+            with st.expander(f"Copy rows for bet tracker ({len(bonus_view)} rows)"):
+                kind = "SNR Bonus" if free_bet_mode == "snr" else "SR Bonus"
+                race_date_iso = meta.get("date_from") if meta else None
+                for _, row in bonus_view.iterrows():
+                    label = f"{row['Runner']} - {row['Track']} R{row['Race #']} ({row['Bookmaker']})"
+                    st.caption(label)
+                    st.code(format_tracker_row(row, kind, race_date_iso, stake, commission_pct, account_prefix),
+                             language=None, wrap_lines=False)
+
     with tab2:
         st.subheader(f"Mug bets - {len(mug_view)} rows "
                      f"(commission {commission_pct:g}%, min liquidity ${min_liquidity:,})")
@@ -630,6 +713,14 @@ def main():
             st.download_button("Export current view to Excel", xlsx,
                                file_name="mug_bets.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+            with st.expander(f"Copy rows for bet tracker ({len(mug_view)} rows)"):
+                race_date_iso = meta.get("date_from") if meta else None
+                for _, row in mug_view.iterrows():
+                    label = f"{row['Runner']} - {row['Track']} R{row['Race #']} ({row['Bookmaker']})"
+                    st.caption(label)
+                    st.code(format_tracker_row(row, "Mug", race_date_iso, stake, commission_pct, account_prefix),
+                             language=None, wrap_lines=False)
 
     with tab3:
         st.subheader("Odds bundle - paste this into a Claude chat")
