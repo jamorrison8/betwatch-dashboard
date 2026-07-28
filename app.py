@@ -452,6 +452,7 @@ def compute_tables(raw_rows, commission, stake, free_bet_mode):
 
         lay_stake, worst = back_lay_outcome(B, L, commission, stake, mode="cash")
         if lay_size is not None and lay_size >= lay_stake:
+            loss_pct = (-worst / stake * 100) if stake else 0.0
             mug_records.append({
                 "Track": r["track"], "Race #": r["race_no"],
                 "Race Time": r.get("race_time"),
@@ -462,6 +463,7 @@ def compute_tables(raw_rows, commission, stake, free_bet_mode):
                 "Total Matched": r["total_matched"],
                 f"Lay Stake (${stake:g})": round(lay_stake, 2),
                 f"Loss (${stake:g})": round(-worst, 2),
+                "Loss %": round(loss_pct, 2),
                 "Status": r["status"],
         })
 
