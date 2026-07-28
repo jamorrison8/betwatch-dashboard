@@ -10,19 +10,73 @@ Fetch-once architecture:
       liquidity) recomputes/refilters instantly from that cached raw data.
       No network calls happen outside the fetch button handler.
 
-Setup:
+Setup (local):
     pip install betwatch streamlit openpyxl pandas
     export BETWATCH_API_KEY="your-key-here"
     streamlit run app.py
 
 The dashboard opens in your browser at http://localhost:8501
+
+Setup (Streamlit Community Cloud):
+    Add two secrets in the app's Settings -> Secrets:
+        BETWATCH_API_KEY = "your-key-here"
+        APP_PASSWORD = "choose-a-password"
+    No code changes needed - the secrets are picked up automatically below.
 """
 
+import os
 from datetime import datetime, date
 from io import BytesIO
 
 import pandas as pd
 import streamlit as st
+
+# ---------------------------------------------------------------------------
+# Deployment helpers: secrets wiring + password gate (no-ops when run locally
+# with an env var and no st.secrets configured)
+# ---------------------------------------------------------------------------
+
+def _load_secrets_into_env():
+    """
+    On Streamlit Community Cloud, BETWATCH_API_KEY is set as a "secret", not
+    an OS env var. betwatch.connect() only reads the environment, so copy it
+    across if present. Locally (env var already set, no secrets.toml) this
+    is a harmless no-op.
+    """
+    try:
+        if "BETWATCH_API_KEY" in st.secrets and not os.environ.get("BETWATCH_API_KEY"):
+            os.environ["BETWATCH_API_KEY"] = st.secrets["BETWATCH_API_KEY"]
+    except Exception:
+        pass  # no secrets.toml at all (e.g. plain local run) - fine
+
+
+def _require_password():
+    """
+    Simple password gate using an APP_PASSWORD secret. If no APP_PASSWORD is
+    configured (e.g. running locally), the gate is skipped entirely - it only
+    activates once you set that secret, which you should do before deploying
+    anywhere publicly reachable.
+    """
+    try:
+        required = st.secrets.get("APP_PASSWORD")
+    except Exception:
+        required = None
+    if not required:
+        return  # no password configured - local/dev use, skip the gate
+
+    if st.session_state.get("_authed"):
+        return
+
+    st.title("Betwatch Odds Dashboard")
+    entered = st.text_input("Password", type="password")
+    if st.button("Enter"):
+        if entered == required:
+            st.session_state["_authed"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()  # halt the rest of the script until authenticated
+
 
 # ---------------------------------------------------------------------------
 # Pure calculation layer (no streamlit, no network - safe to unit test)
@@ -408,6 +462,8 @@ def seed_commission_from_location(raw_rows):
 
 def main():
     st.set_page_config(page_title="Betwatch Odds Dashboard", layout="wide")
+    _load_secrets_into_env()
+    _require_password()  # no-op locally unless APP_PASSWORD secret is set
     st.title("Betwatch Odds Dashboard")
 
     # ---- Top bar: fetch controls (the ONLY network path) ----
