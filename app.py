@@ -423,7 +423,7 @@ def style_mug_table(df):
     if df is None or df.empty:
         return df
     tiers = [
-        (5, "#0B6623", "white"),    # dark green: net profit >= 5%
+        (-5, "#0B6623", "white"),   # dark green: net loss no worse than 5% (best realistic outcome)
         (-10, "#8FD18F", "black"),  # light green: net loss no worse than 10%
         (-15, "#F5D742", "black"),  # yellow: net loss no worse than 15%
         (-20, "#F0A030", "black"),  # orange: net loss no worse than 20%
