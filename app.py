@@ -383,6 +383,64 @@ def build_odds_bundle(raw_rows, race_summaries, meta):
     return "\n".join(lines)
 
 
+def _tier_colors(value, thresholds_desc):
+    """
+    thresholds_desc: list of (cutoff, bg_hex, fg) checked in order, first match
+    wins. Used both for "higher is better" (retention %, descending cutoffs)
+    and "lower is better" (loss %, ascending cutoffs via negated comparison
+    handled by the caller).
+    """
+    for cutoff, bg, fg in thresholds_desc:
+        if value >= cutoff:
+            return f"background-color: {bg}; color: {fg}"
+    return ""
+
+
+def style_bonus_table(df):
+    """Highlight rows by Retention % - higher is better. Text color switches
+    for legibility on darker backgrounds."""
+    if df is None or df.empty:
+        return df
+    tiers = [
+        (80, "#0B6623", "white"),   # dark green
+        (75, "#8FD18F", "black"),  # light green
+        (70, "#F5D742", "black"),  # yellow
+        (65, "#F0A030", "black"),  # orange
+    ]
+
+    def _row_style(row):
+        style = _tier_colors(row["Retention %"], tiers)
+        return [style] * len(row)
+
+    float_cols = df.select_dtypes(include="float").columns
+    return df.style.apply(_row_style, axis=1).format(precision=2, subset=float_cols)
+
+
+def style_mug_table(df):
+    """Highlight rows by Loss % - lower (including negative, i.e. a net
+    profit) is better. Text color switches for legibility on darker
+    backgrounds."""
+    if df is None or df.empty:
+        return df
+    # Loss % thresholds are "at most this much loss" - so we check the
+    # smallest/best cutoffs first, same _tier_colors helper but inverted
+    # (using <= via negation so the shared helper's ">=" logic still works).
+    tiers = [
+        (5, "#0B6623", "white"),    # dark green: loss <= -5% (i.e. net profit >= 5%)
+        (-10, "#8FD18F", "black"),  # light green: loss <= 10%
+        (-15, "#F5D742", "black"),  # yellow: loss <= 15%
+        (-20, "#F0A030", "black"),  # orange: loss <= 20%
+    ]
+
+    def _row_style(row):
+        style = _tier_colors(-row["Loss %"], tiers)
+        return [style] * len(row)
+
+    float_cols = df.select_dtypes(include="float").columns
+    return df.style.apply(_row_style, axis=1).format(precision=2, subset=float_cols)
+
+
+
 def format_tracker_row(row, kind, race_date_iso, stake, commission_pct, account_prefix=""):
     """
     One tab-separated line matching the bet tracker's expected columns:
@@ -443,7 +501,8 @@ def compute_tables(raw_rows, commission, stake, free_bet_mode):
                 "Race Time": r.get("race_time"),
                 "Runner #": r["runner_no"], "Runner": r["runner_name"],
                 "Bookmaker": r["bookmaker"],
-                "Fixed Win": B, "BF Lay": L, "Lay Size": lay_size,
+                "Fixed Win": round(B, 2), "BF Lay": round(L, 2),
+                "Lay Size": round(lay_size, 2) if lay_size is not None else None,
                 "Retention %": round(ret, 2),
                 f"Lay Stake (${stake:g})": round(lay_stake_bonus, 2),
                 f"Return (${stake:g} bonus)": round(profit_bonus, 2),
@@ -458,9 +517,9 @@ def compute_tables(raw_rows, commission, stake, free_bet_mode):
                 "Race Time": r.get("race_time"),
                 "Runner #": r["runner_no"], "Runner": r["runner_name"],
                 "Bookmaker": r["bookmaker"],
-                "Fixed Win": B, "BF Lay": L,
-                "Lay Size": lay_size,
-                "Total Matched": r["total_matched"],
+                "Fixed Win": round(B, 2), "BF Lay": round(L, 2),
+                "Lay Size": round(lay_size, 2) if lay_size is not None else None,
+                "Total Matched": round(r["total_matched"], 2),
                 f"Lay Stake (${stake:g})": round(lay_stake, 2),
                 f"Loss (${stake:g})": round(-worst, 2),
                 "Loss %": round(loss_pct, 2),
@@ -638,7 +697,7 @@ def main():
         target_retention = st.slider("Min retention % (Bonus tab)", 0.0, 120.0, 0.0, 1.0)
         target_loss = st.slider("Max loss $ (Mug tab)", 0.0, 50.0, 50.0, 0.5)
         min_liquidity = st.slider("Min liquidity - BF matched $ (Mug tab)",
-                                  0, 100_000, 2_000, 500)
+                                  0, 100_000, 0, 500)
 
     commission = commission_pct / 100.0
 
@@ -646,12 +705,19 @@ def main():
     bonus_df, mug_df = compute_tables(raw_rows, commission, stake, free_bet_mode)
 
     loss_col = f"Loss (${stake:g})"
+    scanning_all_tracks = (meta.get("track", "ALL") == "ALL") if meta else True
 
     if not bonus_df.empty:
         bonus_view = bonus_df[
             bonus_df["Bookmaker"].isin(sel_bookmakers)
             & (bonus_df["Retention %"] >= target_retention)
-        ].reset_index(drop=True)
+        ]
+        if scanning_all_tracks:
+            # All-tracks scans can return a huge number of rows - a hard floor
+            # keeps the view manageable. A specific-meeting scan shows
+            # everything (subject only to the sliders above).
+            bonus_view = bonus_view[bonus_view["Retention %"] >= 65]
+        bonus_view = bonus_view.reset_index(drop=True)
     else:
         bonus_view = bonus_df
 
@@ -660,7 +726,10 @@ def main():
             mug_df["Bookmaker"].isin(sel_bookmakers)
             & (mug_df["Total Matched"] >= min_liquidity)
             & (mug_df[loss_col] <= target_loss)
-        ].reset_index(drop=True)
+        ]
+        if scanning_all_tracks:
+            mug_view = mug_view[mug_view["Loss %"] < 20]
+        mug_view = mug_view.reset_index(drop=True)
     else:
         mug_view = mug_df
 
@@ -670,7 +739,10 @@ def main():
         st.subheader(f"Bonus conversions - {len(bonus_view)} rows "
                      f"({'SNR' if free_bet_mode == 'snr' else 'SR'}, "
                      f"commission {commission_pct:g}%)")
-        st.dataframe(bonus_view, width="stretch", height=520)
+        if scanning_all_tracks:
+            st.caption("Scanning all tracks - hard floor of 65% retention applied to keep this "
+                       "manageable. Scan a specific track to see every option, unfiltered.")
+        st.dataframe(style_bonus_table(bonus_view), width="stretch", height=520)
         if not bonus_view.empty:
             xlsx = export_view_xlsx(bonus_view, "Bonus Conversions", {
                 "Generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -699,7 +771,10 @@ def main():
     with tab2:
         st.subheader(f"Mug bets - {len(mug_view)} rows "
                      f"(commission {commission_pct:g}%, min liquidity ${min_liquidity:,})")
-        st.dataframe(mug_view, width="stretch", height=520)
+        if scanning_all_tracks:
+            st.caption("Scanning all tracks - hard ceiling of 20% loss applied to keep this "
+                       "manageable. Scan a specific track to see every option, unfiltered.")
+        st.dataframe(style_mug_table(mug_view), width="stretch", height=520)
         if not mug_view.empty:
             xlsx = export_view_xlsx(mug_view, "Mug Bets", {
                 "Generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
