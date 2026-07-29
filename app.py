@@ -417,23 +417,20 @@ def style_bonus_table(df):
 
 
 def style_mug_table(df):
-    """Highlight rows by Loss % - lower (including negative, i.e. a net
-    profit) is better. Text color switches for legibility on darker
-    backgrounds."""
+    """Highlight rows by Net % - a positive value is a net profit, negative
+    is a net loss. Higher (more profit / smaller loss) is better. Text color
+    switches for legibility on darker backgrounds."""
     if df is None or df.empty:
         return df
-    # Loss % thresholds are "at most this much loss" - so we check the
-    # smallest/best cutoffs first, same _tier_colors helper but inverted
-    # (using <= via negation so the shared helper's ">=" logic still works).
     tiers = [
-        (5, "#0B6623", "white"),    # dark green: loss <= -5% (i.e. net profit >= 5%)
-        (-10, "#8FD18F", "black"),  # light green: loss <= 10%
-        (-15, "#F5D742", "black"),  # yellow: loss <= 15%
-        (-20, "#F0A030", "black"),  # orange: loss <= 20%
+        (5, "#0B6623", "white"),    # dark green: net profit >= 5%
+        (-10, "#8FD18F", "black"),  # light green: net loss no worse than 10%
+        (-15, "#F5D742", "black"),  # yellow: net loss no worse than 15%
+        (-20, "#F0A030", "black"),  # orange: net loss no worse than 20%
     ]
 
     def _row_style(row):
-        style = _tier_colors(-row["Loss %"], tiers)
+        style = _tier_colors(row["Net %"], tiers)
         return [style] * len(row)
 
     float_cols = df.select_dtypes(include="float").columns
@@ -511,7 +508,7 @@ def compute_tables(raw_rows, commission, stake, free_bet_mode):
 
         lay_stake, worst = back_lay_outcome(B, L, commission, stake, mode="cash")
         if lay_size is not None and lay_size >= lay_stake:
-            loss_pct = (-worst / stake * 100) if stake else 0.0
+            net_pct = (worst / stake * 100) if stake else 0.0
             mug_records.append({
                 "Track": r["track"], "Race #": r["race_no"],
                 "Race Time": r.get("race_time"),
@@ -522,7 +519,7 @@ def compute_tables(raw_rows, commission, stake, free_bet_mode):
                 "Total Matched": round(r["total_matched"], 2),
                 f"Lay Stake (${stake:g})": round(lay_stake, 2),
                 f"Loss (${stake:g})": round(-worst, 2),
-                "Loss %": round(loss_pct, 2),
+                "Net %": round(net_pct, 2),
                 "Status": r["status"],
         })
 
@@ -728,7 +725,7 @@ def main():
             & (mug_df[loss_col] <= target_loss)
         ]
         if scanning_all_tracks:
-            mug_view = mug_view[mug_view["Loss %"] < 20]
+            mug_view = mug_view[mug_view["Net %"] > -20]
         mug_view = mug_view.reset_index(drop=True)
     else:
         mug_view = mug_df
